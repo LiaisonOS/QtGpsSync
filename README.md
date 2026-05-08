@@ -98,4 +98,4 @@ bluetoothctl
 
 ## License
 
-GPL v2 — same as the LiaisonOS project.
+GPL v3
