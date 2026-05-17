@@ -1,5 +1,8 @@
 #include "MainWindow.h"
 #include <QVBoxLayout>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <QHBoxLayout>
 #include <QDateTime>
 #include <QProcess>
@@ -31,6 +34,18 @@ MainWindow::~MainWindow()
     if (m_gpsMonitor) m_gpsMonitor->stop();
     if (m_thread)     { m_thread->quit();    m_thread->wait(2000); }
     if (m_gpsThread)  { m_gpsThread->quit(); m_gpsThread->wait(2000); }
+
+    // Notify Dashboard that QtGpsSync is closing — grid label returns to normal
+    int fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, "/tmp/et-gps-notify.sock", sizeof(addr.sun_path) - 1);
+        const char *msg = "gps:closed";
+        ::sendto(fd, msg, strlen(msg), 0, (struct sockaddr *)&addr, sizeof(addr));
+        ::close(fd);
+    }
 }
 
 void MainWindow::setupUi()
@@ -242,31 +257,26 @@ QString MainWindow::realUserHome()
     return QDir::homePath();
 }
 
-void MainWindow::saveGrid(const RmcFix &fix, const QString &grid)
+void MainWindow::notifyDashboard(const RmcFix &fix, const QString &grid)
 {
-    QString configPath = realUserHome() + "/.config/emcomm-tools/user.json";
-    QFile f(configPath);
-
+    // Send JSON to QtDashboard via /tmp/et-gps-notify.sock
+    // Dashboard owns user.json — it saves the grid, not us.
     QJsonObject obj;
-    if (f.open(QIODevice::ReadOnly)) {
-        obj = QJsonDocument::fromJson(f.readAll()).object();
-        f.close();
-    }
-
     obj["grid"] = grid;
     obj["lat"]  = fix.lat;
     obj["lon"]  = fix.lon;
+    QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
 
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        f.write(QJsonDocument(obj).toJson());
-        f.close();
-        const char *sudoUser = qgetenv("SUDO_USER").constData();
-        if (sudoUser && strlen(sudoUser) > 0)
-            QProcess::execute("chown", {QString(sudoUser), configPath});
-        log(QString("▸ Grid saved to user.json: %1").arg(grid));
-    } else {
-        log(QString("⚠ Could not write user.json: %1").arg(configPath), "#fbbf24");
-    }
+    int fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/tmp/et-gps-notify.sock", sizeof(addr.sun_path) - 1);
+    ::sendto(fd, data.constData(), data.size(), 0,
+             (struct sockaddr *)&addr, sizeof(addr));
+    ::close(fd);
+    log(QString("▸ Grid sent to Dashboard: %1").arg(grid));
 }
 
 void MainWindow::onSyncFinished(bool success, const RmcFix &fix, long)
@@ -282,7 +292,7 @@ void MainWindow::onSyncFinished(bool success, const RmcFix &fix, long)
         m_fixLabel->setText(QString("Lat: %1  Lon: %2  Grid: %3")
             .arg(fix.lat, 0, 'f', 5).arg(fix.lon, 0, 'f', 5).arg(grid));
         log(QString("✓ Sync complete — Grid: %1").arg(grid), "#4ade80");
-        saveGrid(fix, grid);
+        notifyDashboard(fix, grid);
     } else {
         m_statusLabel->setText("Sync failed");
         m_clockLabel->setStyleSheet("color: #f87171;");

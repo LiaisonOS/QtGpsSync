@@ -39,7 +39,7 @@ private:
     void setRunning(bool running);
     void setGpsMode(bool active);
     QString realUserHome();
-    void saveGrid(const RmcFix &fix, const QString &grid);
+    void notifyDashboard(const RmcFix &fix, const QString &grid);
 
     QLabel      *m_clockLabel;
     QTextEdit   *m_logView;
